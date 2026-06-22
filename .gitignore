@@ -1,0 +1,6 @@
+.prompts
+.tasks
+.codex
+aws-access-keys.csv
+.env
+.env.local
