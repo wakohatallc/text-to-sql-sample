@@ -122,6 +122,14 @@ LIMIT 10;
 
 ## 検証
 
+まとめて確認する場合は次を実行する。
+
+```bash
+npm run verify
+```
+
+個別に確認する場合は次を実行する。
+
 ```bash
 npm run lint
 npm test

@@ -16,8 +16,14 @@
     "db:import": "scripts/db/import-tenant-data.sh",
     "db:check": "scripts/db/check-local-db.sh",
     "db:reset": "scripts/db/reset-local-db.sh",
-    "lint": "ruby -c lib/data_importer.rb && bash -n scripts/db/*.sh && npm run build -w packages/shared && npm run lint -w apps/api && npm run lint -w apps/web && npm run lint -w packages/shared",
-    "test": "npm run db:check && npm run test -w apps/api",
+    "lint:ruby": "ruby -c lib/data_importer.rb",
+    "lint:shell": "bash -n scripts/db/*.sh",
+    "typecheck": "npm run build -w packages/shared && npm run lint -w apps/api && npm run lint -w apps/web && npm run lint -w packages/shared",
+    "lint": "npm run lint:ruby && npm run lint:shell && npm run typecheck",
+    "test:db": "npm run db:check",
+    "test:unit": "npm run test -w apps/api",
+    "test": "npm run test:db && npm run test:unit",
+    "verify": "npm run lint && npm test && npm run build",
     "build": "npm run build -w packages/shared && npm run build -w apps/api && npm run build -w apps/web"
   },
   "devDependencies": {
