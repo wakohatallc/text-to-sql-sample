@@ -1,0 +1,16 @@
+{
+  "name": "text-to-sql-sample",
+  "private": true,
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:setup": "scripts/db/setup-local-db.sh",
+    "db:migrate": "scripts/db/migrate-local-db.sh",
+    "db:seed": "scripts/db/seed-local-db.sh",
+    "db:import": "scripts/db/import-tenant-data.sh",
+    "db:check": "scripts/db/check-local-db.sh",
+    "db:reset": "scripts/db/reset-local-db.sh",
+    "lint": "ruby -c lib/data_importer.rb && bash -n scripts/db/*.sh",
+    "test": "scripts/db/check-local-db.sh",
+    "build": "echo \"No application build is configured yet\""
+  }
+}
