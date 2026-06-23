@@ -122,7 +122,13 @@ function ResultChart({ result, visualization }: { result: SqlResultData; visuali
     return <ResultTable result={result} />;
   }
 
-  const data = result.rows.filter((row) => typeof row[visualization.yKey!] === "number");
+  const data = result.rows
+    .map((row) => {
+      const rawValue = row[visualization.yKey!];
+      const numericValue = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" ? Number(rawValue) : NaN;
+      return { ...row, [visualization.yKey!]: numericValue };
+    })
+    .filter((row) => Number.isFinite(row[visualization.yKey!] as number));
 
   if (data.length === 0) {
     return <ResultTable result={result} />;

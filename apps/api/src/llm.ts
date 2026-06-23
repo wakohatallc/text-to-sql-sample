@@ -61,13 +61,19 @@ export function fallbackSql(question: string): string {
 export function chooseVisualization(question: string, result: SqlResultData): VisualizationData {
   const requestedKind = requestedVisualizationKind(question);
   const xKey = result.columns.find((column) => result.rows.some((row) => typeof row[column] === "string"));
-  const yKey = result.columns.find((column) => result.rows.some((row) => typeof row[column] === "number"));
+  const yKey = result.columns.find((column) => result.rows.some((row) => isNumericValue(row[column])));
 
   if (requestedKind === "table" || !xKey || !yKey) {
     return { kind: "table" };
   }
 
   return { kind: requestedKind, xKey, yKey };
+}
+
+function isNumericValue(value: string | number | boolean | null | undefined): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "string" || value.trim() === "") return false;
+  return Number.isFinite(Number(value));
 }
 
 /**
@@ -91,10 +97,16 @@ export function systemPrompt(): string {
   ].join("\n");
 }
 
-function requestedVisualizationKind(question: string): VisualizationKind {
-  if (/テーブル|表|table/i.test(question)) return "table";
+/**
+ * ユーザー文から要求された可視化種別を判定する。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns 可視化種別。明示がなければtable。
+ */
+export function requestedVisualizationKind(question: string): VisualizationKind {
   if (/棒グラフ|bar/i.test(question)) return "bar";
   if (/折れ線|line/i.test(question)) return "line";
   if (/円グラフ|pie/i.test(question)) return "pie";
+  if (/テーブル|表形式|表で|表に|table/i.test(question)) return "table";
   return "table";
 }

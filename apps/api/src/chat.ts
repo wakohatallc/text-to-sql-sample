@@ -2,6 +2,7 @@ import { openai } from "@ai-sdk/openai";
 import type {
   ChatDataParts,
   ChatMetadata,
+  SqlData,
   SqlResultData,
   TraceData,
   VisualizationData,
@@ -21,7 +22,7 @@ import { z } from "zod";
 import { commonPool, getDbConnection, type DbConnection } from "./db";
 import type { AuthUser } from "./auth";
 import { config } from "./config";
-import { chooseVisualization, fallbackSql, systemPrompt } from "./llm";
+import { chooseVisualization, fallbackSql, requestedVisualizationKind, systemPrompt } from "./llm";
 import {
   executeReadOnlySql,
   formatSchemaContext,
@@ -116,6 +117,35 @@ function latestUserText(messages: AppChatMessage[]): string {
 
   if (!text) throw new Error("INVALID_REQUEST");
   return text;
+}
+
+/**
+ * 前回SQL結果の表示形式だけを変える依頼かどうかを判定する。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns 表示形式変更だけの依頼であればtrue。
+ */
+function isVisualizationFollowUp(question: string): boolean {
+  const normalized = question.trim();
+  if (!/テーブル|表|棒グラフ|折れ線|円グラフ|table|bar|line|pie/i.test(normalized)) return false;
+  return /^(テーブル|表|棒グラフ|折れ線|円グラフ|table|bar|line|pie)(で|に)?(表示|描画|返して|見せて)/i.test(normalized);
+}
+
+/**
+ * 会話履歴から直近のSQL結果partsを探す。
+ *
+ * @param messages AI SDK UI messages。
+ * @returns 再利用可能なSQLと結果。
+ */
+function findPreviousSqlResult(messages: AppChatMessage[]): { sql?: SqlData; result: SqlResultData } | undefined {
+  for (const message of [...messages].reverse()) {
+    if (message.role !== "assistant") continue;
+    const result = [...message.parts].reverse().find((part) => part.type === "data-sql-result")?.data;
+    if (!result) continue;
+    const sql = [...message.parts].reverse().find((part) => part.type === "data-sql")?.data;
+    return { sql, result };
+  }
+  return undefined;
 }
 
 /**
@@ -430,6 +460,42 @@ async function streamFallback({
 }
 
 /**
+ * 前回SQL結果を再利用して表示形式だけを変えるstreamを返す。
+ */
+async function streamVisualizationFollowUp({
+  writer,
+  previous,
+  question,
+  threadId
+}: {
+  writer: UIMessageStreamWriter<AppChatMessage>;
+  previous: { sql?: SqlData; result: SqlResultData };
+  question: string;
+  threadId: string;
+}): Promise<void> {
+  const visualization = chooseVisualization(question, previous.result);
+  writer.write({ type: "start", messageMetadata: { threadId } });
+  writeTrace(writer, {
+    label: "前回結果を再利用",
+    status: "succeeded",
+    detail: `${requestedVisualizationKind(question)}表示`
+  });
+  if (previous.sql) {
+    writer.write({ type: "data-sql", data: previous.sql });
+  }
+  writer.write({ type: "data-sql-result", data: previous.result });
+  writer.write({ type: "data-visualization", data: visualization });
+  writer.write({ type: "text-start", id: "visualization-follow-up" });
+  writer.write({
+    type: "text-delta",
+    id: "visualization-follow-up",
+    delta: `前回のSQL実行結果を${visualization.kind}で表示する。`
+  });
+  writer.write({ type: "text-end", id: "visualization-follow-up" });
+  writer.write({ type: "finish", finishReason: "stop", messageMetadata: { threadId } });
+}
+
+/**
  * 自然言語質問をstreaming chatとして処理する。
  */
 export async function handleChatStream(
@@ -442,10 +508,16 @@ export async function handleChatStream(
   const dbConnection = await getDbConnection(user.accountId);
   const attempts: SqlAttempt[] = [];
   let usage: CapturedUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const reusableResult = isVisualizationFollowUp(question) ? findPreviousSqlResult(messages) : undefined;
 
   const stream = createUIMessageStream<AppChatMessage>({
     originalMessages: messages,
     execute: async ({ writer }) => {
+      if (reusableResult) {
+        await streamVisualizationFollowUp({ writer, previous: reusableResult, question, threadId: actualThreadId });
+        return;
+      }
+
       if (!config.openai.apiKey) {
         await streamFallback({ writer, dbConnection, question, attempts, threadId: actualThreadId });
         return;
