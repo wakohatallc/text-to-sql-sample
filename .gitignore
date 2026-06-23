@@ -4,5 +4,6 @@
 aws-access-keys.csv
 .env
 .env.local
+data/
 node_modules
 dist
