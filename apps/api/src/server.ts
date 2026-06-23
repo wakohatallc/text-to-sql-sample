@@ -2,6 +2,9 @@ import { serve } from "@hono/node-server";
 import { config } from "./config";
 import { app } from "./routes";
 
+/**
+ * HonoアプリケーションをローカルAPIサーバとして起動する。
+ */
 serve(
   {
     fetch: app.fetch,

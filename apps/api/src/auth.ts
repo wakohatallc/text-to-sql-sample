@@ -4,6 +4,9 @@ import type { Context, MiddlewareHandler } from "hono";
 import { config } from "./config";
 import { commonPool } from "./db";
 
+/**
+ * Cookieセッションから復元される認証済みユーザーである。
+ */
 export type AuthUser = {
   id: string;
   accountId: number;
@@ -11,20 +14,44 @@ export type AuthUser = {
   name: string;
 };
 
+/**
+ * Honoのコンテキストへ注入するアプリケーション変数である。
+ */
 export type AppVariables = {
   user: AuthUser;
 };
 
+/**
+ * セッションtokenをDB保存用のSHA-256 hashへ変換する。
+ *
+ * @param value hash化する平文token。
+ * @returns 16進文字列のSHA-256 hash。
+ */
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * 文字列比較のタイミング差を抑えるための等価判定である。
+ *
+ * @param a 比較対象の文字列。
+ * @param b 比較対象の文字列。
+ * @returns 文字列が同一であればtrue。
+ */
 function equalString(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/**
+ * デモユーザーのメールアドレスとパスワードを検証し、Cookieへ入れるセッションtokenを発行する。
+ *
+ * @param email ログイン対象のメールアドレス。
+ * @param password デモログイン用パスワード。
+ * @returns 発行したセッションtokenとユーザー情報。
+ * @throws 認証に失敗した場合は`INVALID_CREDENTIALS`を投げる。
+ */
 export async function login(email: string, password: string): Promise<{ token: string; user: AuthUser }> {
   const result = await commonPool.query<{
     id: string;
@@ -62,6 +89,11 @@ export async function login(email: string, password: string): Promise<{ token: s
   };
 }
 
+/**
+ * セッションtokenに対応するセッションを失効済みに更新する。
+ *
+ * @param token Cookieから読み取ったセッションtoken。
+ */
 export async function logout(token: string | undefined): Promise<void> {
   if (!token) return;
   await commonPool.query(
@@ -73,6 +105,12 @@ export async function logout(token: string | undefined): Promise<void> {
   );
 }
 
+/**
+ * Cookieのセッションtokenから現在の認証済みユーザーを復元する。
+ *
+ * @param token Cookieから読み取ったセッションtoken。
+ * @returns 有効なセッションがあればユーザー情報、なければnull。
+ */
 export async function currentUserFromToken(token: string | undefined): Promise<AuthUser | null> {
   if (!token) return null;
 
@@ -103,6 +141,12 @@ export async function currentUserFromToken(token: string | undefined): Promise<A
   };
 }
 
+/**
+ * ブラウザへHTTP onlyのセッションCookieを書き込む。
+ *
+ * @param c Honoのリクエストコンテキスト。
+ * @param token 発行済みセッションtoken。
+ */
 export function setSessionCookie(c: Context, token: string): void {
   setCookie(c, config.session.cookieName, token, {
     httpOnly: true,
@@ -113,16 +157,30 @@ export function setSessionCookie(c: Context, token: string): void {
   });
 }
 
+/**
+ * ブラウザ上のセッションCookieを削除する。
+ *
+ * @param c Honoのリクエストコンテキスト。
+ */
 export function clearSessionCookie(c: Context): void {
   deleteCookie(c, config.session.cookieName, {
     path: "/"
   });
 }
 
+/**
+ * リクエストCookieからセッションtokenを読み取る。
+ *
+ * @param c Honoのリクエストコンテキスト。
+ * @returns セッションtoken。Cookieがなければundefined。
+ */
 export function readSessionToken(c: Context): string | undefined {
   return getCookie(c, config.session.cookieName);
 }
 
+/**
+ * 認証済みユーザーだけにroute処理を通すHono middlewareである。
+ */
 export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> = async (c, next) => {
   const user = await currentUserFromToken(readSessionToken(c));
   if (!user) {

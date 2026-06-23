@@ -1,3 +1,6 @@
+/**
+ * LLMへ渡すtenant DBの固定スキーマ情報と業務ルールである。
+ */
 export const schemaContext = `
 PostgreSQL tenant schema:
 

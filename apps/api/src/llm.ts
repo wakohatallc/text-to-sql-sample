@@ -4,6 +4,9 @@ import { z } from "zod";
 import { config } from "./config";
 import { schemaContext } from "./schema-context";
 
+/**
+ * SQL生成処理の出力である。
+ */
 export type GeneratedSql = {
   sql: string;
   explanation: string;
@@ -15,15 +18,29 @@ export type GeneratedSql = {
   };
 };
 
+/**
+ * LLMの構造化出力として期待するSQL候補のschemaである。
+ */
 const sqlSchema = z.object({
   sql: z.string(),
   explanation: z.string()
 });
 
+/**
+ * MVP代表ユースケースに該当する質問かどうかを判定する。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns 2018年売上ランキング質問であればtrue。
+ */
 function isCanonicalSalesRankingQuestion(question: string): boolean {
   return /2018/i.test(question) && /売り上げ|売上/i.test(question) && /ランキング|上位|top/i.test(question);
 }
 
+/**
+ * 計画書で定義した代表ユースケース用のcanonical SQLを返す。
+ *
+ * @returns 2018年のseller別売上ランキングSQL。
+ */
 function canonicalSalesRankingSql(): string {
   return `
     SELECT
@@ -40,6 +57,12 @@ function canonicalSalesRankingSql(): string {
   `;
 }
 
+/**
+ * OpenAI APIが使えない場合でもローカル検証を完了できるSQLを返す。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns fallbackとして実行するSELECT SQL。
+ */
 function fallbackSql(question: string): string {
   if (isCanonicalSalesRankingQuestion(question)) {
     return canonicalSalesRankingSql();
@@ -54,6 +77,15 @@ function fallbackSql(question: string): string {
   `;
 }
 
+/**
+ * 自然言語質問からPostgreSQL向けSELECT SQLを生成する。
+ *
+ * MVP代表質問は結果の揺れを避けるためcanonical SQLを優先し、それ以外はOpenAIの構造化出力を使う。
+ * OpenAI API key未設定または生成失敗時はローカルfallback SQLへ切り替える。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns SQL、説明、生成経路、token利用量。
+ */
 export async function generateSql(question: string): Promise<GeneratedSql> {
   if (isCanonicalSalesRankingQuestion(question)) {
     return {

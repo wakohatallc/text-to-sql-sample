@@ -1,9 +1,18 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { LogOut, Play, RefreshCw, Send } from "lucide-react";
+import { AlertCircle, Database, LogOut, Play, RefreshCw, Send } from "lucide-react";
 import type { ChatResponse, ChatThread, User } from "@text-to-sql/shared";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import "./styles.css";
 
+/**
+ * APIエラーレスポンスの標準形である。
+ */
 type ApiError = {
   error: {
     code: string;
@@ -11,10 +20,20 @@ type ApiError = {
   };
 };
 
+/**
+ * 画面上の会話ログとして保持するメッセージである。
+ */
 type Message =
   | { role: "user"; text: string }
   | { role: "assistant"; text: string; response: ChatResponse };
 
+/**
+ * Cookie付きでJSON APIを呼び出し、失敗時はAPIエラー文言を例外に変換する。
+ *
+ * @param url 呼び出すAPI path。
+ * @param init fetchへ渡す追加オプション。
+ * @returns APIから返されたJSON。
+ */
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     credentials: "include",
@@ -34,6 +53,11 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+/**
+ * ログイン、自然言語質問入力、SQLと結果表の表示を担当するReactアプリ本体である。
+ *
+ * @returns Text-to-SQLの操作画面。
+ */
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [threads, setThreads] = useState<ChatThread[]>([]);
@@ -45,12 +69,18 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * 初回表示時に既存Cookieセッションからログイン状態を復元する。
+   */
   useEffect(() => {
     requestJson<{ user: User }>("/me")
       .then((data) => setUser(data.user))
       .catch(() => undefined);
   }, []);
 
+  /**
+   * ログイン後またはスレッド更新後にチャットスレッド一覧を再取得する。
+   */
   useEffect(() => {
     if (!user) return;
     requestJson<{ threads: ChatThread[] }>("/chat-threads")
@@ -58,6 +88,9 @@ function App() {
       .catch(() => undefined);
   }, [user, threadId]);
 
+  /**
+   * 結果表示に使う直近のassistantレスポンスである。
+   */
   const latestResponse = useMemo(() => {
     const assistants = messages.filter((message): message is Extract<Message, { role: "assistant" }> => {
       return message.role === "assistant";
@@ -65,6 +98,11 @@ function App() {
     return assistants.at(-1)?.response;
   }, [messages]);
 
+  /**
+   * デモログインフォーム送信時にCookieセッションを作成する。
+   *
+   * @param event フォーム送信イベント。
+   */
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
@@ -82,6 +120,9 @@ function App() {
     }
   }
 
+  /**
+   * 現在のCookieセッションを破棄し、画面状態を未ログインへ戻す。
+   */
   async function handleLogout() {
     await requestJson<{ ok: true }>("/auth/logout", { method: "POST", body: JSON.stringify({}) });
     setUser(null);
@@ -90,6 +131,11 @@ function App() {
     setMessages([]);
   }
 
+  /**
+   * 自然言語質問をAPIへ送り、SQL実行結果を会話ログと結果表へ反映する。
+   *
+   * @param event フォーム送信イベント。
+   */
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const trimmed = question.trim();
@@ -115,125 +161,154 @@ function App() {
 
   if (!user) {
     return (
-      <main className="loginShell">
-        <form className="loginPanel" onSubmit={handleLogin}>
-          <div>
-            <h1>Text-to-SQL</h1>
-            <p>Demo Account</p>
-          </div>
-          <label>
-            Email
-            <input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" />
-          </label>
-          <label>
-            Password
-            <input
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              type="password"
-              autoComplete="current-password"
-            />
-          </label>
-          {error ? <div className="error">{error}</div> : null}
-          <button className="primaryButton" disabled={loading} type="submit">
-            <Play size={16} />
-            Login
-          </button>
-        </form>
+      <main className="grid min-h-screen place-items-center bg-muted/40 px-4">
+        <Card className="w-full max-w-[420px]">
+          <CardHeader>
+            <CardTitle className="text-xl">Text-to-SQL</CardTitle>
+            <CardDescription>Demo Account</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-4" onSubmit={handleLogin}>
+              <label className="grid gap-2 text-sm font-medium">
+                Email
+                <Input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" />
+              </label>
+              <label className="grid gap-2 text-sm font-medium">
+                Password
+                <Input
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  type="password"
+                  autoComplete="current-password"
+                />
+              </label>
+              {error ? (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              ) : null}
+              <Button className="w-full" disabled={loading} type="submit">
+                <Play />
+                Login
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
       </main>
     );
   }
 
   return (
-    <main className="appShell">
-      <aside className="sidebar">
-        <div className="brand">
-          <h1>Text-to-SQL</h1>
-          <span>{user.email}</span>
+    <main className="grid min-h-screen grid-cols-1 bg-background lg:grid-cols-[280px_minmax(0,1fr)]">
+      <aside className="grid gap-4 border-b bg-card p-4 lg:min-h-screen lg:grid-rows-[auto_auto_1fr_auto] lg:border-b-0 lg:border-r lg:p-5">
+        <div className="grid gap-1">
+          <h1 className="text-xl font-semibold tracking-tight">Text-to-SQL</h1>
+          <p className="text-sm text-muted-foreground">{user.email}</p>
         </div>
-        <button
-          className="secondaryButton"
+        <Button
+          className="justify-start"
+          variant="outline"
           type="button"
           onClick={() => {
             setThreadId(undefined);
             setMessages([]);
           }}
         >
-          <RefreshCw size={15} />
+          <RefreshCw />
           New
-        </button>
-        <nav className="threadList">
+        </Button>
+        <nav className="hidden min-h-0 content-start gap-2 overflow-auto lg:grid">
           {threads.map((thread) => (
-            <button
-              className={thread.id === threadId ? "thread active" : "thread"}
+            <Button
+              className="justify-start overflow-hidden text-ellipsis whitespace-nowrap"
               key={thread.id}
+              variant={thread.id === threadId ? "secondary" : "ghost"}
               type="button"
               onClick={() => setThreadId(thread.id)}
             >
               {thread.title}
-            </button>
+            </Button>
           ))}
         </nav>
-        <button className="iconTextButton" type="button" onClick={handleLogout}>
-          <LogOut size={15} />
+        <Button className="justify-start" variant="ghost" type="button" onClick={handleLogout}>
+          <LogOut />
           Logout
-        </button>
+        </Button>
       </aside>
 
-      <section className="workspace">
-        <div className="conversation">
-          {messages.length === 0 ? (
-            <div className="emptyState">
-              <strong>Ready</strong>
-              <span>tenant: data_0001</span>
-            </div>
-          ) : (
-            messages.map((message, index) => (
-              <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-                <div className="messageRole">{message.role}</div>
-                <div className="messageText">{message.text}</div>
-              </article>
-            ))
-          )}
-        </div>
+      <section className="grid min-w-0 grid-rows-[minmax(220px,1fr)_auto_auto_auto] gap-4 p-4 lg:p-6">
+        <Card className="min-h-[220px] overflow-hidden">
+          <CardContent className="grid max-h-[44vh] content-start gap-3 overflow-auto p-4 lg:max-h-[52vh] lg:p-5">
+            {messages.length === 0 ? (
+              <div className="grid min-h-[190px] place-items-center rounded-md border border-dashed text-muted-foreground">
+                <div className="grid justify-items-center gap-2">
+                  <Database className="h-5 w-5" />
+                  <strong className="text-foreground">Ready</strong>
+                  <span className="text-sm">tenant: data_0001</span>
+                </div>
+              </div>
+            ) : (
+              messages.map((message, index) => (
+                <article className="grid gap-1 border-b pb-3 last:border-b-0" key={`${message.role}-${index}`}>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">{message.role}</div>
+                  <div className="whitespace-pre-wrap text-sm leading-6">{message.text}</div>
+                </article>
+              ))
+            )}
+          </CardContent>
+        </Card>
 
-        <form className="composer" onSubmit={handleSubmit}>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} />
-          <button className="sendButton" disabled={loading} type="submit" title="Run query">
-            <Send size={17} />
-          </button>
+        <form className="grid grid-cols-[minmax(0,1fr)_44px] gap-2" onSubmit={handleSubmit}>
+          <Input value={question} onChange={(event) => setQuestion(event.target.value)} />
+          <Button disabled={loading} type="submit" title="Run query" size="icon">
+            <Send />
+          </Button>
         </form>
 
-        {error ? <div className="error">{error}</div> : null}
+        {error ? (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
 
         {latestResponse ? (
-          <section className="resultArea">
-            <div className="resultMeta">
-              <span>{latestResponse.generationMode}</span>
-              <span>{latestResponse.rowCount} rows</span>
-              <span>{latestResponse.durationMs} ms</span>
+          <section className="grid min-w-0 gap-3">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">{latestResponse.generationMode}</Badge>
+              <Badge variant="outline">{latestResponse.rowCount} rows</Badge>
+              <Badge variant="outline">{latestResponse.durationMs} ms</Badge>
             </div>
-            <pre className="sqlBlock">{latestResponse.sql}</pre>
-            <div className="tableWrap">
-              <table>
-                <thead>
-                  <tr>
+            <Card>
+              <CardContent className="p-0">
+                <pre className="overflow-auto p-4 text-sm leading-6">{latestResponse.sql}</pre>
+              </CardContent>
+            </Card>
+            <Card className="overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
                     {latestResponse.columns.map((column) => (
-                      <th key={column}>{column}</th>
+                      <TableHead className="whitespace-nowrap" key={column}>
+                        {column}
+                      </TableHead>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {latestResponse.rows.map((row, rowIndex) => (
-                    <tr key={rowIndex}>
+                    <TableRow key={rowIndex}>
                       {latestResponse.columns.map((column) => (
-                        <td key={column}>{String(row[column] ?? "")}</td>
+                        <TableCell className="whitespace-nowrap" key={column}>
+                          {String(row[column] ?? "")}
+                        </TableCell>
                       ))}
-                    </tr>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
-            </div>
+                </TableBody>
+              </Table>
+            </Card>
           </section>
         ) : null}
       </section>
@@ -241,6 +316,9 @@ function App() {
   );
 }
 
+/**
+ * ReactアプリをHTML上のroot要素へマウントする。
+ */
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

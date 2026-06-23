@@ -1,6 +1,9 @@
 import pg from "pg";
 import { config } from "./config";
 
+/**
+ * 認証、接続定義、チャット履歴、利用量を保持する共通DBへの接続プールである。
+ */
 export const commonPool = new pg.Pool({
   host: config.commonDb.host,
   port: config.commonDb.port,
@@ -10,6 +13,9 @@ export const commonPool = new pg.Pool({
   max: 5
 });
 
+/**
+ * アカウントに紐づくtenant DB接続定義である。
+ */
 export type DbConnection = {
   id: string;
   accountId: number;
@@ -18,6 +24,13 @@ export type DbConnection = {
   databaseName: string;
 };
 
+/**
+ * 共通DBの`db_connections`から、指定アカウントの有効なtenant接続先を取得する。
+ *
+ * @param accountId tenant接続先を解決するアカウントID。
+ * @returns 有効なtenant DB接続定義。
+ * @throws 有効な接続定義が存在しない場合は`TENANT_CONNECTION_NOT_FOUND`を投げる。
+ */
 export async function getDbConnection(accountId: number): Promise<DbConnection> {
   const result = await commonPool.query<{
     id: string;
@@ -47,6 +60,12 @@ export async function getDbConnection(accountId: number): Promise<DbConnection> 
   };
 }
 
+/**
+ * tenant DBへ読み取り専用ユーザーで接続するための短命な接続プールを作成する。
+ *
+ * @param connection 共通DBから解決したtenant DB接続定義。
+ * @returns tenant DB向けPostgreSQL接続プール。
+ */
 export function createTenantPool(connection: DbConnection): pg.Pool {
   return new pg.Pool({
     host: connection.host,

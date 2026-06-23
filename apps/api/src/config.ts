@@ -1,10 +1,22 @@
 import "dotenv/config";
 import { config as loadDotenv } from "dotenv";
 
+/**
+ * ローカル実行時の`.env.local`を読み込み、既存の環境変数を優先する。
+ */
 loadDotenv({ path: ".env.local", override: false });
 
+/**
+ * PostgreSQL管理ユーザーの既定値である。
+ *
+ * Homebrew PostgreSQLでは`postgres`ロールにDB作成権限がない場合があるため、
+ * 明示指定がなければOSユーザー名のロールを優先する。
+ */
 const defaultAdminUser = process.env.POSTGRES_USER ?? process.env.USER ?? "postgres";
 
+/**
+ * APIサーバ、DB、OpenAI、Cookieセッションのランタイム設定である。
+ */
 export const config = {
   port: Number(process.env.API_PORT ?? "3001"),
   commonDb: {

@@ -4,11 +4,25 @@ import type { AuthUser } from "./auth";
 import { generateSql } from "./llm";
 import { executeReadOnlySql, validateAndNormalizeSql } from "./sql";
 
+/**
+ * 質問文からチャットスレッド一覧向けの短いタイトルを作る。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns 40文字以内に丸めたスレッドタイトル。
+ */
 function titleFromQuestion(question: string): string {
   const trimmed = question.trim().replace(/\s+/g, " ");
   return trimmed.length > 40 ? `${trimmed.slice(0, 39)}...` : trimmed || "新しいチャット";
 }
 
+/**
+ * 既存スレッドの所有権を確認し、使えない場合は新規スレッドを作成する。
+ *
+ * @param user 認証済みユーザー。
+ * @param threadId クライアントから指定された既存スレッドID。
+ * @param question 新規作成時のタイトル生成に使う質問文。
+ * @returns 使用するチャットスレッドID。
+ */
 async function ensureThread(user: AuthUser, threadId: string | undefined, question: string): Promise<string> {
   if (threadId) {
     const result = await commonPool.query(
@@ -31,6 +45,14 @@ async function ensureThread(user: AuthUser, threadId: string | undefined, questi
   return result.rows[0]!.id;
 }
 
+/**
+ * 自然言語質問を受け取り、SQL生成、検証、tenant DB実行、履歴保存を一括で行う。
+ *
+ * @param user 認証済みユーザー。
+ * @param question ユーザーが入力した自然言語質問。
+ * @param threadId 追記先の既存スレッドID。未指定または不正な場合は新規作成する。
+ * @returns Web UIへ返すSQL実行結果。
+ */
 export async function handleChat(user: AuthUser, question: string, threadId?: string): Promise<ChatResponse> {
   const actualThreadId = await ensureThread(user, threadId, question);
   const dbConnection = await getDbConnection(user.accountId);

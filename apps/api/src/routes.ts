@@ -13,8 +13,14 @@ import {
 import { commonPool } from "./db";
 import { handleChat } from "./chat";
 
+/**
+ * HonoのAPI route定義本体である。
+ */
 export const app = new Hono<{ Variables: AppVariables }>();
 
+/**
+ * Vite dev serverからCookie付きAPI呼び出しを許可するCORS設定である。
+ */
 app.use(
   "*",
   cors({
@@ -23,8 +29,14 @@ app.use(
   })
 );
 
+/**
+ * APIサーバの疎通確認用エンドポイントである。
+ */
 app.get("/health", (c) => c.json({ ok: true }));
 
+/**
+ * デモユーザーでログインし、HTTP only Cookieセッションを作成する。
+ */
 app.post("/auth/login", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { email?: string; password?: string };
   try {
@@ -37,17 +49,26 @@ app.post("/auth/login", async (c) => {
   }
 });
 
+/**
+ * 現在のCookieセッションを失効させる。
+ */
 app.post("/auth/logout", async (c) => {
   await logout(readSessionToken(c));
   clearSessionCookie(c);
   return c.json({ ok: true });
 });
 
+/**
+ * Cookieセッションから現在ログイン中のユーザーを返す。
+ */
 app.get("/me", requireAuth, (c) => {
   const user: User = c.get("user");
   return c.json({ user });
 });
 
+/**
+ * 現在のユーザーが所有するチャットスレッド一覧を返す。
+ */
 app.get("/chat-threads", requireAuth, async (c) => {
   const user = c.get("user");
   const result = await commonPool.query<{
@@ -73,6 +94,9 @@ app.get("/chat-threads", requireAuth, async (c) => {
   return c.json({ threads });
 });
 
+/**
+ * 自然言語質問をSQLへ変換し、tenant DBの実行結果を返す。
+ */
 app.post("/api/chat", requireAuth, async (c) => {
   const user = c.get("user");
   const body = (await c.req.json().catch(() => ({}))) as { message?: string; threadId?: string };
