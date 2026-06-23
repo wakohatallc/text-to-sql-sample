@@ -71,6 +71,26 @@ npm run db:check    # local DB検証
 npm run db:reset    # Docker volume削除後に再構築
 ```
 
+## アプリ起動
+
+```bash
+npm run dev
+```
+
+ローカルURLは次である。
+
+```text
+Web: http://127.0.0.1:3000/
+API: http://127.0.0.1:3001/
+```
+
+デモログイン情報は次である。
+
+```text
+email: demo@example.com
+password: password
+```
+
 ### 代表SQL
 
 ローカル検証では次のSQLが通ることを確認している。

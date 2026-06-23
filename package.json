@@ -1,7 +1,14 @@
 {
   "name": "text-to-sql-sample",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"npm run dev -w apps/api\" \"npm run dev -w apps/web\"",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
     "db:up": "docker compose up -d postgres",
     "db:setup": "scripts/db/setup-local-db.sh",
     "db:migrate": "scripts/db/migrate-local-db.sh",
@@ -9,8 +16,11 @@
     "db:import": "scripts/db/import-tenant-data.sh",
     "db:check": "scripts/db/check-local-db.sh",
     "db:reset": "scripts/db/reset-local-db.sh",
-    "lint": "ruby -c lib/data_importer.rb && bash -n scripts/db/*.sh",
-    "test": "scripts/db/check-local-db.sh",
-    "build": "echo \"No application build is configured yet\""
+    "lint": "ruby -c lib/data_importer.rb && bash -n scripts/db/*.sh && npm run build -w packages/shared && npm run lint -w apps/api && npm run lint -w apps/web && npm run lint -w packages/shared",
+    "test": "npm run db:check && npm run test -w apps/api",
+    "build": "npm run build -w packages/shared && npm run build -w apps/api && npm run build -w apps/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }
