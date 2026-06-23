@@ -130,7 +130,7 @@ Vercel AI SDKは、自然言語からSQL候補を生成するLLM呼び出しの�
 
 ```ts
 import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+import { generateText, Output } from "ai";
 ```
 
 役割分担は次である。
@@ -150,13 +150,13 @@ import { generateObject } from "ai";
 POST /api/chat
   -> handleChat(user, question, threadId)
     -> generateSql(question)
-      -> generateObject({ model: openai(config.openai.model), schema, system, prompt })
+      -> generateText({ model: openai(config.openai.model), output: Output.object({ schema }), system, prompt })
     -> validateAndNormalizeSql(generated.sql)
     -> executeReadOnlySql(...)
     -> chat_messages / sql_runs / llm_usages へ保存
 ```
 
-`generateObject` を使う理由は、LLM出力を自由文ではなく次のZod schemaに合わせたobjectとして受け取るためである。
+`generateText` と `Output.object` を使う理由は、LLM出力を自由文ではなく次のZod schemaに合わせたobjectとして受け取るためである。
 
 ```ts
 const sqlSchema = z.object({
@@ -165,7 +165,9 @@ const sqlSchema = z.object({
 });
 ```
 
-このため `apps/api/src/llm.ts` は、AI SDKから返る `result.object.sql` をSQL候補、`result.object.explanation` を生成理由として扱える。加えて `result.usage` から `inputTokens`、`outputTokens`、`totalTokens` を取得し、`apps/api/src/chat.ts` が `llm_usages` に保存する。
+このため `apps/api/src/llm.ts` は、AI SDKから返る `result.output.sql` をSQL候補、`result.output.explanation` を生成理由として扱える。加えて `result.usage` から `inputTokens`、`outputTokens`、`totalTokens` を取得し、`apps/api/src/chat.ts` が `llm_usages` に保存する。
+
+現在の実装では、AI SDKのtool callingは使っていない。`tool(...)` や `tools` は定義しておらず、LLMにSQL検証やSQL実行をtoolとして選択させる設計ではない。AI SDKは構造化されたSQL候補の生成だけを担当し、SQL検証とSQL実行は常にサーバ側の通常処理として実行する。
 
 AI SDKへ渡すpromptは2層で構成している。
 
@@ -178,7 +180,7 @@ AI SDKへ渡すpromptは2層で構成している。
 
 重要な境界は、AI SDKが「SQL候補を生成するだけ」である点である。SQLを実行してよいかは `apps/api/src/sql.ts` のguardrailが決める。したがって、LLMが危険なSQLや複数statementを返しても、tenant DB実行前に拒否または正規化される。
 
-現在の実装は `ai` v5系の `generateObject` を前提にしている。将来AI SDK v6系へ上げる場合は、構造化出力APIの変更に合わせて `apps/api/src/llm.ts` のadapter部分だけを更新する。
+現在の実装は `ai` v6系の `generateText` と `Output.object` を前提にしている。将来AI SDKの構造化出力APIが変わる場合も、`apps/api/src/llm.ts` のadapter部分だけを更新する。
 
 ## SQL安全策
 

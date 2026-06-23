@@ -1,5 +1,5 @@
 import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+import { generateText, Output } from "ai";
 import { z } from "zod";
 import { config } from "./config";
 import { schemaContext } from "./schema-context";
@@ -106,9 +106,9 @@ export async function generateSql(question: string): Promise<GeneratedSql> {
   }
 
   try {
-    const result = await generateObject({
+    const result = await generateText({
       model: openai(config.openai.model),
-      schema: sqlSchema,
+      output: Output.object({ schema: sqlSchema }),
       abortSignal: AbortSignal.timeout(15_000),
       system: [
         "You are a senior PostgreSQL text-to-SQL generator.",
@@ -120,8 +120,8 @@ export async function generateSql(question: string): Promise<GeneratedSql> {
     });
 
     return {
-      sql: result.object.sql,
-      explanation: result.object.explanation,
+      sql: result.output.sql,
+      explanation: result.output.explanation,
       generationMode: "openai",
       usage: {
         inputTokens: result.usage.inputTokens ?? 0,
