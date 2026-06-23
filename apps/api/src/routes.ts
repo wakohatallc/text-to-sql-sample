@@ -11,7 +11,7 @@ import {
   type AppVariables
 } from "./auth";
 import { commonPool } from "./db";
-import { handleChat } from "./chat";
+import { handleChatStream, type AppChatMessage } from "./chat";
 
 /**
  * HonoのAPI route定義本体である。
@@ -95,19 +95,17 @@ app.get("/chat-threads", requireAuth, async (c) => {
 });
 
 /**
- * 自然言語質問をSQLへ変換し、tenant DBの実行結果を返す。
+ * 自然言語質問をSQLへ変換し、tenant DBの実行結果をUI message streamで返す。
  */
 app.post("/api/chat", requireAuth, async (c) => {
   const user = c.get("user");
-  const body = (await c.req.json().catch(() => ({}))) as { message?: string; threadId?: string };
-  const message = body.message?.trim();
-  if (!message) {
+  const body = (await c.req.json().catch(() => ({}))) as { messages?: AppChatMessage[]; threadId?: string };
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return c.json({ error: { code: "INVALID_REQUEST", message: "質問を入力する必要がある" } }, 400);
   }
 
   try {
-    const response = await handleChat(user, message, body.threadId);
-    return c.json(response);
+    return await handleChatStream(user, body.messages, body.threadId);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : "Unknown error";
     const code = messageText.startsWith("SQL_VALIDATION_FAILED")

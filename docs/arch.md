@@ -124,25 +124,9 @@ LIMIT 10;
 
 ## Vercel AI SDKの利用箇所
 
-Vercel AI SDKは、自然言語からSQL候補を生成するLLM呼び出しの薄いadapterとしてだけ使っている。認証、tenant解決、SQL検証、SQL実行、履歴保存はAI SDKへ委譲せず、アプリケーション側で制御する。
+Vercel AI SDKは、自然言語からSQL候補を生成するLLM呼び出しの薄いadapterとしてだけ使っている。認証、tenant解決、SQL検証、SQL実行、履歴保存はAI SDKへ委譲せず、アプリケーション側で制御する。詳細は [AI_SDK.md](AI_SDK.md) を参照する。
 
 利用箇所は `apps/api/src/llm.ts` である。`apps/web` ではAI SDKを直接使っていない。
-
-```ts
-import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
-```
-
-役割分担は次である。
-
-| ファイル | 役割 |
-| --- | --- |
-| `apps/api/package.json` | `ai` と `@ai-sdk/openai` をAPI側dependencyとして持つ |
-| `apps/api/src/config.ts` | `OPENAI_API_KEY` と `OPENAI_MODEL` をサーバ環境変数から読む |
-| `apps/api/src/llm.ts` | AI SDKを呼び、`sql` / `explanation` の構造化出力を受け取る |
-| `apps/api/src/chat.ts` | `generateSql` の結果をSQL検証・実行へ渡し、token usageを `llm_usages` に保存する |
-| `apps/api/src/schema-context.ts` | LLMへ渡す固定schema contextを定義する |
-| `apps/api/src/sql.ts` | AI SDKの出力を信用せず、実行前に必ずSQLを検証・正規化する |
 
 実行時の呼び出し経路は次である。
 
@@ -150,35 +134,13 @@ import { generateObject } from "ai";
 POST /api/chat
   -> handleChat(user, question, threadId)
     -> generateSql(question)
-      -> generateObject({ model: openai(config.openai.model), schema, system, prompt })
+      -> generateText({ model: openai(config.openai.model), output: Output.object({ schema }), system, prompt })
     -> validateAndNormalizeSql(generated.sql)
     -> executeReadOnlySql(...)
     -> chat_messages / sql_runs / llm_usages へ保存
 ```
 
-`generateObject` を使う理由は、LLM出力を自由文ではなく次のZod schemaに合わせたobjectとして受け取るためである。
-
-```ts
-const sqlSchema = z.object({
-  sql: z.string(),
-  explanation: z.string()
-});
-```
-
-このため `apps/api/src/llm.ts` は、AI SDKから返る `result.object.sql` をSQL候補、`result.object.explanation` を生成理由として扱える。加えて `result.usage` から `inputTokens`、`outputTokens`、`totalTokens` を取得し、`apps/api/src/chat.ts` が `llm_usages` に保存する。
-
-AI SDKへ渡すpromptは2層で構成している。
-
-- `system`: PostgreSQL向けText-to-SQL generatorとしての役割、安全な単一SELECTだけを返す制約、固定schema contextを渡す。
-- `prompt`: ユーザーの自然言語質問を `User question: ...` として渡す。
-
-`model: openai(config.openai.model)` は、`@ai-sdk/openai` のOpenAI providerに対して利用モデルを指定する箇所である。モデル名は `OPENAI_MODEL` で差し替え可能で、未指定時は `gpt-4.1-mini` を使う。`OPENAI_API_KEY` はサーバ側環境変数としてだけ扱い、ブラウザへ渡さない。
-
-ただし、すべての質問でAI SDKを呼ぶわけではない。MVP代表質問は結果を安定させるためcanonical SQLを返し、`OPENAI_API_KEY` 未設定時や生成失敗時もfallback SQLを返す。この場合 `generationMode` は `fallback`、token usageは0で保存される。
-
-重要な境界は、AI SDKが「SQL候補を生成するだけ」である点である。SQLを実行してよいかは `apps/api/src/sql.ts` のguardrailが決める。したがって、LLMが危険なSQLや複数statementを返しても、tenant DB実行前に拒否または正規化される。
-
-現在の実装は `ai` v5系の `generateObject` を前提にしている。将来AI SDK v6系へ上げる場合は、構造化出力APIの変更に合わせて `apps/api/src/llm.ts` のadapter部分だけを更新する。
+現在は `generateText` と `Output.object` により、`sql` と `explanation` の構造化出力を受け取る。AI SDKのtool callingは使っていない。LLMには固定の `schemaContext` を渡してSQL候補を生成させるが、SQL検証とSQL実行は常にサーバ側の通常処理として実行する。
 
 ## SQL安全策
 

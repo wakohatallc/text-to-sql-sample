@@ -25,6 +25,10 @@
 - Ruby
 - PostgreSQL client tools (`psql`, `createdb`)
 
+### サンプルデータ
+
+`data/` 配下には、Kaggleの [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce?select=olist_customers_dataset.csv) からダウンロードしたCSVファイルを配置する。
+
 ### セットアップ
 
 ```bash
@@ -121,6 +125,14 @@ LIMIT 10;
 - SQL実行は読み取り専用に限定し、DDL/DML/複文/危険関数を拒否する。
 
 ## 検証
+
+まとめて確認する場合は次を実行する。
+
+```bash
+npm run verify
+```
+
+個別に確認する場合は次を実行する。
 
 ```bash
 npm run lint

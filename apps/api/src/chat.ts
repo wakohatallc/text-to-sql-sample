@@ -1,8 +1,64 @@
-import type { ChatResponse } from "@text-to-sql/shared";
-import { commonPool, getDbConnection } from "./db";
+import { openai } from "@ai-sdk/openai";
+import type {
+  ChatDataParts,
+  ChatMetadata,
+  SqlData,
+  SqlResultData,
+  TraceData,
+  VisualizationData,
+  VisualizationKind
+} from "@text-to-sql/shared";
+import {
+  convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  stepCountIs,
+  streamText,
+  tool,
+  type UIMessage,
+  type UIMessageStreamWriter
+} from "ai";
+import { z } from "zod";
+import { commonPool, getDbConnection, type DbConnection } from "./db";
 import type { AuthUser } from "./auth";
-import { generateSql } from "./llm";
-import { executeReadOnlySql, validateAndNormalizeSql } from "./sql";
+import { config } from "./config";
+import { chooseVisualization, fallbackSql, requestedVisualizationKind, systemPrompt } from "./llm";
+import {
+  executeReadOnlySql,
+  formatSchemaContext,
+  inspectTenantSchema,
+  validateAndNormalizeSql,
+  type ExecutedSql
+} from "./sql";
+
+/**
+ * このアプリで扱うAI SDK UI messageである。
+ */
+export type AppChatMessage = UIMessage<ChatMetadata, ChatDataParts>;
+
+type SqlAttempt = {
+  generatedSql: string;
+  normalizedSql: string;
+  status: "succeeded" | "failed" | "rejected";
+  columns: string[];
+  rows: SqlResultData["rows"];
+  rowCount: number;
+  durationMs: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type CapturedUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+
+const traceSchema = z.object({
+  label: z.string(),
+  status: z.enum(["running", "succeeded", "failed"]),
+  detail: z.string().optional()
+});
 
 /**
  * 質問文からチャットスレッド一覧向けの短いタイトルを作る。
@@ -46,73 +102,199 @@ async function ensureThread(user: AuthUser, threadId: string | undefined, questi
 }
 
 /**
- * 自然言語質問を受け取り、SQL生成、検証、tenant DB実行、履歴保存を一括で行う。
+ * 最新user messageから自然言語質問を取り出す。
  *
- * @param user 認証済みユーザー。
- * @param question ユーザーが入力した自然言語質問。
- * @param threadId 追記先の既存スレッドID。未指定または不正な場合は新規作成する。
- * @returns Web UIへ返すSQL実行結果。
+ * @param messages AI SDK UI messages。
+ * @returns 最新user messageのtext。
  */
-export async function handleChat(user: AuthUser, question: string, threadId?: string): Promise<ChatResponse> {
-  const actualThreadId = await ensureThread(user, threadId, question);
-  const dbConnection = await getDbConnection(user.accountId);
-  const generated = await generateSql(question);
-  const normalizedSql = validateAndNormalizeSql(generated.sql);
-  const executed = await executeReadOnlySql(dbConnection, normalizedSql);
+function latestUserText(messages: AppChatMessage[]): string {
+  const message = [...messages].reverse().find((item) => item.role === "user");
+  const text = message?.parts
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
 
+  if (!text) throw new Error("INVALID_REQUEST");
+  return text;
+}
+
+/**
+ * 前回SQL結果の表示形式だけを変える依頼かどうかを判定する。
+ *
+ * @param question ユーザーが入力した自然言語質問。
+ * @returns 表示形式変更だけの依頼であればtrue。
+ */
+function isVisualizationFollowUp(question: string): boolean {
+  const normalized = question.trim();
+  if (!/テーブル|表|棒グラフ|折れ線|円グラフ|table|bar|line|pie/i.test(normalized)) return false;
+  return /^(テーブル|表|棒グラフ|折れ線|円グラフ|table|bar|line|pie)(で|に)?(表示|描画|返して|見せて)/i.test(normalized);
+}
+
+/**
+ * 会話履歴から直近のSQL結果partsを探す。
+ *
+ * @param messages AI SDK UI messages。
+ * @returns 再利用可能なSQLと結果。
+ */
+function findPreviousSqlResult(messages: AppChatMessage[]): { sql?: SqlData; result: SqlResultData } | undefined {
+  for (const message of [...messages].reverse()) {
+    if (message.role !== "assistant") continue;
+    const result = [...message.parts].reverse().find((part) => part.type === "data-sql-result")?.data;
+    if (!result) continue;
+    const sql = [...message.parts].reverse().find((part) => part.type === "data-sql")?.data;
+    return { sql, result };
+  }
+  return undefined;
+}
+
+/**
+ * UI streamへtrace partを追加する。
+ *
+ * @param writer UI stream writer。
+ * @param trace 作業ログ。
+ */
+function writeTrace(writer: UIMessageStreamWriter<AppChatMessage>, trace: TraceData): void {
+  const parsed = traceSchema.parse(trace);
+  writer.write({ type: "data-trace", data: parsed });
+}
+
+/**
+ * UI streamへSQL実行結果partsを追加する。
+ *
+ * @param writer UI stream writer。
+ * @param sql 正規化済みSQL。
+ * @param result SQL実行結果。
+ * @param visualization 可視化指定。
+ */
+function writeSqlResultParts(
+  writer: UIMessageStreamWriter<AppChatMessage>,
+  sql: string,
+  result: SqlResultData,
+  visualization: VisualizationData
+): void {
+  const sqlPart = { sql };
+  writer.write({ type: "data-sql", data: sqlPart });
+  writer.write({ type: "data-sql-result", data: result });
+  writer.write({ type: "data-visualization", data: visualization });
+}
+
+/**
+ * SQL実行エラーをユーザー・LLMへ返してよい形へ丸める。
+ *
+ * @param error 捕捉した例外。
+ * @returns sanitized error。
+ */
+function sanitizeSqlError(error: unknown): { code: string; message: string } {
+  const message = error instanceof Error ? error.message : "Unknown SQL error";
+  if (message.startsWith("SQL_VALIDATION_FAILED")) {
+    return { code: "SQL_VALIDATION_FAILED", message };
+  }
+  return { code: "SQL_EXECUTION_FAILED", message: message.split("\n")[0] ?? "SQL execution failed" };
+}
+
+/**
+ * DB実行結果をUI向けのJSON互換値に変換する。
+ *
+ * @param executed SQL実行結果。
+ * @returns UI stream用SQL実行結果。
+ */
+function toSqlResultData(executed: ExecutedSql): SqlResultData {
+  return {
+    columns: executed.columns,
+    rows: executed.rows,
+    rowCount: executed.rowCount,
+    durationMs: executed.durationMs
+  };
+}
+
+/**
+ * OpenAI token usageを既存DB schemaへ保存する形へ変換する。
+ *
+ * @param usage AI SDK usage。
+ * @returns token数。
+ */
+function captureUsage(usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number }): CapturedUsage {
+  return {
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    totalTokens: usage.totalTokens ?? 0
+  };
+}
+
+/**
+ * 実行済み会話を既存テーブルへ保存する。
+ */
+async function persistFinishedChat({
+  user,
+  threadId,
+  dbConnection,
+  question,
+  responseMessage,
+  attempts,
+  usage
+}: {
+  user: AuthUser;
+  threadId: string;
+  dbConnection: DbConnection;
+  question: string;
+  responseMessage: AppChatMessage;
+  attempts: SqlAttempt[];
+  usage: CapturedUsage;
+}): Promise<void> {
   const userMessageResult = await commonPool.query<{ id: string }>(
     `INSERT INTO chat_messages (account_id, thread_id, role, parts)
      VALUES ($1, $2, 'user', $3::jsonb)
      RETURNING id`,
-    [user.accountId, actualThreadId, JSON.stringify([{ type: "text", text: question }])]
+    [user.accountId, threadId, JSON.stringify([{ type: "text", text: question }])]
   );
   const userMessageId = userMessageResult.rows[0]!.id;
-
-  const assistantText = "SQLを実行した結果である。";
-  const assistantParts = [
-    { type: "text", text: assistantText },
-    { type: "data-sql", data: { sql: normalizedSql } },
-    { type: "data-sql-result", data: { columns: executed.columns, rows: executed.rows } }
-  ];
 
   const assistantMessageResult = await commonPool.query<{ id: string }>(
     `INSERT INTO chat_messages (account_id, thread_id, role, parts)
      VALUES ($1, $2, 'assistant', $3::jsonb)
      RETURNING id`,
-    [user.accountId, actualThreadId, JSON.stringify(assistantParts)]
+    [user.accountId, threadId, JSON.stringify(responseMessage.parts)]
   );
   const assistantMessageId = assistantMessageResult.rows[0]!.id;
 
-  await commonPool.query(
-    `INSERT INTO sql_runs (
-       account_id,
-       thread_id,
-       message_id,
-       db_connection_id,
-       database_name,
-       generated_sql,
-       normalized_sql,
-       status,
-       columns,
-       rows,
-       row_count,
-       duration_ms
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'succeeded', $8::jsonb, $9::jsonb, $10, $11)`,
-    [
-      user.accountId,
-      actualThreadId,
-      assistantMessageId,
-      dbConnection.id,
-      dbConnection.databaseName,
-      generated.sql,
-      normalizedSql,
-      JSON.stringify(executed.columns),
-      JSON.stringify(executed.rows),
-      executed.rowCount,
-      executed.durationMs
-    ]
-  );
+  for (const attempt of attempts) {
+    await commonPool.query(
+      `INSERT INTO sql_runs (
+         account_id,
+         thread_id,
+         message_id,
+         db_connection_id,
+         database_name,
+         generated_sql,
+         normalized_sql,
+         status,
+         columns,
+         rows,
+         row_count,
+         duration_ms,
+         error_code,
+         error_message
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14)`,
+      [
+        user.accountId,
+        threadId,
+        assistantMessageId,
+        dbConnection.id,
+        dbConnection.databaseName,
+        attempt.generatedSql,
+        attempt.normalizedSql,
+        attempt.status,
+        JSON.stringify(attempt.columns),
+        JSON.stringify(attempt.rows),
+        attempt.rowCount,
+        attempt.durationMs,
+        attempt.errorCode ?? null,
+        attempt.errorMessage ?? null
+      ]
+    );
+  }
 
   const pricingResult = await commonPool.query<{ id: string }>(
     `SELECT id
@@ -121,10 +303,9 @@ export async function handleChat(user: AuthUser, question: string, threadId?: st
         AND model_id = $1
       ORDER BY effective_from DESC
       LIMIT 1`,
-    [process.env.OPENAI_MODEL ?? "gpt-4.1-mini"]
+    [config.openai.model]
   );
 
-  const pricingSnapshotId = pricingResult.rows[0]?.id ?? null;
   await commonPool.query(
     `INSERT INTO llm_usages (
        account_id,
@@ -143,13 +324,13 @@ export async function handleChat(user: AuthUser, question: string, threadId?: st
     [
       user.accountId,
       user.id,
-      actualThreadId,
+      threadId,
       assistantMessageId,
-      process.env.OPENAI_MODEL ?? "gpt-4.1-mini",
-      generated.usage.inputTokens,
-      generated.usage.outputTokens,
-      generated.usage.totalTokens,
-      pricingSnapshotId
+      config.openai.model,
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.totalTokens,
+      pricingResult.rows[0]?.id ?? null
     ]
   );
 
@@ -157,19 +338,263 @@ export async function handleChat(user: AuthUser, question: string, threadId?: st
     `UPDATE chat_threads
         SET updated_at = now()
       WHERE id = $1`,
-    [actualThreadId]
+    [threadId]
   );
 
   void userMessageId;
+}
 
-  return {
-    threadId: actualThreadId,
-    assistantMessage: assistantText,
-    sql: normalizedSql,
-    columns: executed.columns,
-    rows: executed.rows,
-    rowCount: executed.rowCount,
-    durationMs: executed.durationMs,
-    generationMode: generated.generationMode
-  };
+/**
+ * SQL toolを実行し、結果またはsanitized errorを返す。
+ */
+async function runSqlTool({
+  sql,
+  dbConnection,
+  question,
+  writer,
+  attempts
+}: {
+  sql: string;
+  dbConnection: DbConnection;
+  question: string;
+  writer: UIMessageStreamWriter<AppChatMessage>;
+  attempts: SqlAttempt[];
+}): Promise<
+  | { ok: true; sql: string; columns: string[]; rows: SqlResultData["rows"]; rowCount: number; durationMs: number }
+  | { ok: false; code: string; message: string }
+> {
+  if (attempts.length >= 3) {
+    writeTrace(writer, {
+      label: "再試行上限",
+      status: "failed",
+      detail: "SQL修正は3回までである"
+    });
+    return { ok: false, code: "MAX_SQL_ATTEMPTS_REACHED", message: "SQL修正は3回までである" };
+  }
+
+  writeTrace(writer, { label: "SQL実行", status: "running", detail: `attempt ${attempts.length + 1}` });
+
+  try {
+    const normalizedSql = validateAndNormalizeSql(sql);
+    const executed = await executeReadOnlySql(dbConnection, normalizedSql);
+    const result = toSqlResultData(executed);
+    const visualization = chooseVisualization(question, result);
+    attempts.push({
+      generatedSql: sql,
+      normalizedSql,
+      status: "succeeded",
+      columns: result.columns,
+      rows: result.rows,
+      rowCount: result.rowCount,
+      durationMs: result.durationMs
+    });
+    writeTrace(writer, {
+      label: "SQL実行",
+      status: "succeeded",
+      detail: `${result.rowCount} rows / ${result.durationMs} ms`
+    });
+    writeSqlResultParts(writer, normalizedSql, result, visualization);
+    return { ok: true, sql: normalizedSql, ...result };
+  } catch (error) {
+    const sanitized = sanitizeSqlError(error);
+    const status = sanitized.code === "SQL_VALIDATION_FAILED" ? "rejected" : "failed";
+    attempts.push({
+      generatedSql: sql,
+      normalizedSql: "",
+      status,
+      columns: [],
+      rows: [],
+      rowCount: 0,
+      durationMs: 0,
+      errorCode: sanitized.code,
+      errorMessage: sanitized.message
+    });
+    writeTrace(writer, {
+      label: status === "rejected" ? "SQL拒否" : "SQLエラー",
+      status: "failed",
+      detail: sanitized.message
+    });
+    return { ok: false, ...sanitized };
+  }
+}
+
+/**
+ * OpenAI API keyがない場合のローカルfallback streamを作る。
+ */
+async function streamFallback({
+  writer,
+  dbConnection,
+  question,
+  attempts,
+  threadId
+}: {
+  writer: UIMessageStreamWriter<AppChatMessage>;
+  dbConnection: DbConnection;
+  question: string;
+  attempts: SqlAttempt[];
+  threadId: string;
+}): Promise<void> {
+  writer.write({ type: "start", messageMetadata: { threadId } });
+  writeTrace(writer, { label: "schema確認", status: "running" });
+  const columns = await inspectTenantSchema(dbConnection);
+  writeTrace(writer, {
+    label: "schema確認",
+    status: "succeeded",
+    detail: `${new Set(columns.map((column) => column.tableName)).size} tables`
+  });
+  const result = await runSqlTool({
+    sql: fallbackSql(question),
+    dbConnection,
+    question,
+    writer,
+    attempts
+  });
+  const text =
+    result.ok && result.rowCount > 0
+      ? "OpenAI API keyが未設定であるため、fallback SQLを実行した結果である。"
+      : "OpenAI API keyが未設定であり、fallback SQLの実行にも失敗した。";
+  writer.write({ type: "text-start", id: "fallback-answer" });
+  writer.write({ type: "text-delta", id: "fallback-answer", delta: text });
+  writer.write({ type: "text-end", id: "fallback-answer" });
+  writer.write({ type: "finish", finishReason: "stop", messageMetadata: { threadId } });
+}
+
+/**
+ * 前回SQL結果を再利用して表示形式だけを変えるstreamを返す。
+ */
+async function streamVisualizationFollowUp({
+  writer,
+  previous,
+  question,
+  threadId
+}: {
+  writer: UIMessageStreamWriter<AppChatMessage>;
+  previous: { sql?: SqlData; result: SqlResultData };
+  question: string;
+  threadId: string;
+}): Promise<void> {
+  const visualization = chooseVisualization(question, previous.result);
+  writer.write({ type: "start", messageMetadata: { threadId } });
+  writeTrace(writer, {
+    label: "前回結果を再利用",
+    status: "succeeded",
+    detail: `${requestedVisualizationKind(question)}表示`
+  });
+  if (previous.sql) {
+    writer.write({ type: "data-sql", data: previous.sql });
+  }
+  writer.write({ type: "data-sql-result", data: previous.result });
+  writer.write({ type: "data-visualization", data: visualization });
+  writer.write({ type: "text-start", id: "visualization-follow-up" });
+  writer.write({
+    type: "text-delta",
+    id: "visualization-follow-up",
+    delta: `前回のSQL実行結果を${visualization.kind}で表示する。`
+  });
+  writer.write({ type: "text-end", id: "visualization-follow-up" });
+  writer.write({ type: "finish", finishReason: "stop", messageMetadata: { threadId } });
+}
+
+/**
+ * 自然言語質問をstreaming chatとして処理する。
+ */
+export async function handleChatStream(
+  user: AuthUser,
+  messages: AppChatMessage[],
+  threadId?: string
+): Promise<Response> {
+  const question = latestUserText(messages);
+  const actualThreadId = await ensureThread(user, threadId, question);
+  const dbConnection = await getDbConnection(user.accountId);
+  const attempts: SqlAttempt[] = [];
+  let usage: CapturedUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const reusableResult = isVisualizationFollowUp(question) ? findPreviousSqlResult(messages) : undefined;
+
+  const stream = createUIMessageStream<AppChatMessage>({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      if (reusableResult) {
+        await streamVisualizationFollowUp({ writer, previous: reusableResult, question, threadId: actualThreadId });
+        return;
+      }
+
+      if (!config.openai.apiKey) {
+        await streamFallback({ writer, dbConnection, question, attempts, threadId: actualThreadId });
+        return;
+      }
+
+      const tools = {
+        inspectSchema: tool({
+          description: "Inspect the allowed PostgreSQL tenant schema before writing SQL.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            writeTrace(writer, { label: "schema確認", status: "running" });
+            const columns = await inspectTenantSchema(dbConnection);
+            const schema = formatSchemaContext(columns);
+            writeTrace(writer, {
+              label: "schema確認",
+              status: "succeeded",
+              detail: `${new Set(columns.map((column) => column.tableName)).size} tables`
+            });
+            return { schema };
+          }
+        }),
+        executeSql: tool({
+          description: "Validate and execute one read-only PostgreSQL SELECT SQL. Returns sanitized errors for revision.",
+          inputSchema: z.object({
+            sql: z.string().describe("One PostgreSQL SELECT statement.")
+          }),
+          execute: async ({ sql }) =>
+            runSqlTool({
+              sql,
+              dbConnection,
+              question,
+              writer,
+              attempts
+            })
+        })
+      };
+
+      const result = streamText({
+        model: openai(config.openai.model),
+        system: systemPrompt(),
+        messages: await convertToModelMessages(messages, { ignoreIncompleteToolCalls: true }),
+        tools,
+        stopWhen: stepCountIs(5),
+        abortSignal: AbortSignal.timeout(30_000),
+        onFinish: ({ totalUsage }) => {
+          usage = captureUsage(totalUsage);
+        }
+      });
+
+      writer.merge(
+        result.toUIMessageStream<AppChatMessage>({
+          sendStart: true,
+          messageMetadata: ({ part }) =>
+            part.type === "start" || part.type === "finish" ? { threadId: actualThreadId } : undefined
+        })
+      );
+    },
+    onFinish: async ({ responseMessage }) => {
+      await persistFinishedChat({
+        user,
+        threadId: actualThreadId,
+        dbConnection,
+        question,
+        responseMessage,
+        attempts,
+        usage
+      });
+    },
+    onError: () => "チャット処理に失敗した"
+  });
+
+  return createUIMessageStreamResponse({ stream });
+}
+
+/**
+ * UIから来た任意の可視化指定を許可済みkindへ丸める。
+ */
+export function normalizeVisualizationKind(value: unknown): VisualizationKind {
+  return value === "bar" || value === "line" || value === "pie" || value === "table" ? value : "table";
 }
