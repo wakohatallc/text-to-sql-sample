@@ -108,13 +108,18 @@ assistant message metadataには `threadId` を含める。Web側は `onFinish` 
 
 グラフ描画は、LLMが画像やReact componentを生成する仕組みではない。SQL実行結果をtyped dataとしてstreamし、Web UIが決定的に描画する。
 
+ここでいう `result` はLLMレスポンスではない。LLMが直接返すのは、`executeSql` tool inputの `sql` である。そのSQLをサーバ側で検証・正規化し、DBへ実行した結果を `SqlResultData` に変換したものが `chooseVisualization(question, result)` の `result` である。
+
 流れは次である。
 
 ```text
 user message
+  -> LLM
+    -> executeSql tool input: { sql: "SELECT ..." }
   -> executeSql tool
     -> validateAndNormalizeSql(...)
     -> executeReadOnlySql(...)
+    -> toSqlResultData(executed)
     -> chooseVisualization(question, result)
     -> data-sql-result / data-visualization をstream
   -> Web
@@ -132,6 +137,21 @@ user message
 | `円グラフ`、`pie` | `pie` |
 
 グラフ描画には、SQL結果のうち文字列列をx軸候補、数値列をy軸候補として使う。該当列がない場合、または可視化指定が成立しない場合は表へfallbackする。これにより、LLMに任意のchart configを生成させず、UI側で扱える安全な表示形式だけに限定している。
+
+型境界は次である。
+
+```ts
+type SqlResultData = {
+  columns: string[];
+  rows: Record<string, string | number | boolean | null>[];
+  rowCount: number;
+  durationMs: number;
+};
+```
+
+この型はサーバコードが組み立てるUI stream用の型であり、LLMのJSON出力schemaではない。したがって、グラフ描画のためにJSON modeを使っているわけではない。LLM出力の型制約は `executeSql` toolの `inputSchema` で行い、SQL実行結果の型は `executeReadOnlySql()` と `toSqlResultData()` のサーバ処理で揃える。
+
+ただし、DBから返る値はランタイムデータである。たとえばPostgreSQLの `numeric` は `pg` で文字列として返る場合があるため、数値列判定やグラフ描画を安定させるには、`toSqlResultData()` で数値文字列をnumberへ正規化する、または `chooseVisualization()` 側で数値文字列をy軸候補として扱う改善余地がある。
 
 現在の初期実装では、可視化指定は「そのリクエストで実行されたSQL結果」に対して付与する。前回のSQL結果を再実行せずに「同じ結果を棒グラフにして」といった再描画だけを行う場合は、Web側で直近の `data-sql-result` を再利用して `data-visualization` だけを差し替える経路を追加する必要がある。
 

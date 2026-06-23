@@ -25,6 +25,10 @@
 - Ruby
 - PostgreSQL client tools (`psql`, `createdb`)
 
+### サンプルデータ
+
+`data/` 配下には、Kaggleの [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce?select=olist_customers_dataset.csv) からダウンロードしたCSVファイルを配置する。
+
 ### セットアップ
 
 ```bash
