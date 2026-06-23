@@ -1,30 +1,4 @@
-import { openai } from "@ai-sdk/openai";
-import { generateText, Output } from "ai";
-import { z } from "zod";
-import { config } from "./config";
-import { schemaContext } from "./schema-context";
-
-/**
- * SQL生成処理の出力である。
- */
-export type GeneratedSql = {
-  sql: string;
-  explanation: string;
-  generationMode: "openai" | "fallback";
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-  };
-};
-
-/**
- * LLMの構造化出力として期待するSQL候補のschemaである。
- */
-const sqlSchema = z.object({
-  sql: z.string(),
-  explanation: z.string()
-});
+import type { SqlResultData, VisualizationData, VisualizationKind } from "@text-to-sql/shared";
 
 /**
  * MVP代表ユースケースに該当する質問かどうかを判定する。
@@ -32,7 +6,7 @@ const sqlSchema = z.object({
  * @param question ユーザーが入力した自然言語質問。
  * @returns 2018年売上ランキング質問であればtrue。
  */
-function isCanonicalSalesRankingQuestion(question: string): boolean {
+export function isCanonicalSalesRankingQuestion(question: string): boolean {
   return /2018/i.test(question) && /売り上げ|売上/i.test(question) && /ランキング|上位|top/i.test(question);
 }
 
@@ -41,7 +15,7 @@ function isCanonicalSalesRankingQuestion(question: string): boolean {
  *
  * @returns 2018年のseller別売上ランキングSQL。
  */
-function canonicalSalesRankingSql(): string {
+export function canonicalSalesRankingSql(): string {
   return `
     SELECT
       oi.seller_id,
@@ -63,7 +37,7 @@ function canonicalSalesRankingSql(): string {
  * @param question ユーザーが入力した自然言語質問。
  * @returns fallbackとして実行するSELECT SQL。
  */
-function fallbackSql(question: string): string {
+export function fallbackSql(question: string): string {
   if (isCanonicalSalesRankingQuestion(question)) {
     return canonicalSalesRankingSql();
   }
@@ -78,63 +52,49 @@ function fallbackSql(question: string): string {
 }
 
 /**
- * 自然言語質問からPostgreSQL向けSELECT SQLを生成する。
- *
- * MVP代表質問は結果の揺れを避けるためcanonical SQLを優先し、それ以外はOpenAIの構造化出力を使う。
- * OpenAI API key未設定または生成失敗時はローカルfallback SQLへ切り替える。
+ * ユーザー指定と結果列から初期可視化を選ぶ。
  *
  * @param question ユーザーが入力した自然言語質問。
- * @returns SQL、説明、生成経路、token利用量。
+ * @param result SQL実行結果。
+ * @returns UIへ渡す可視化指定。
  */
-export async function generateSql(question: string): Promise<GeneratedSql> {
-  if (isCanonicalSalesRankingQuestion(question)) {
-    return {
-      sql: canonicalSalesRankingSql(),
-      explanation: "MVP代表ユースケースのため、計画書のcanonical SQLを使った。",
-      generationMode: "fallback",
-      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
-    };
+export function chooseVisualization(question: string, result: SqlResultData): VisualizationData {
+  const requestedKind = requestedVisualizationKind(question);
+  const xKey = result.columns.find((column) => result.rows.some((row) => typeof row[column] === "string"));
+  const yKey = result.columns.find((column) => result.rows.some((row) => typeof row[column] === "number"));
+
+  if (requestedKind === "table" || !xKey || !yKey) {
+    return { kind: "table" };
   }
 
-  if (!config.openai.apiKey) {
-    return {
-      sql: fallbackSql(question),
-      explanation: "OpenAI API keyが未設定であるため、ローカルfallback SQLを使った。",
-      generationMode: "fallback",
-      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
-    };
-  }
+  return { kind: requestedKind, xKey, yKey };
+}
 
-  try {
-    const result = await generateText({
-      model: openai(config.openai.model),
-      output: Output.object({ schema: sqlSchema }),
-      abortSignal: AbortSignal.timeout(15_000),
-      system: [
-        "You are a senior PostgreSQL text-to-SQL generator.",
-        "Return one safe PostgreSQL SELECT statement only in the sql field.",
-        "Do not return DDL, DML, COPY, CALL, DO, multiple statements, comments, or explanatory text inside SQL.",
-        schemaContext
-      ].join("\n\n"),
-      prompt: `User question: ${question}`
-    });
+/**
+ * Text-to-SQL agentのsystem promptを作る。
+ *
+ * @returns system prompt。
+ */
+export function systemPrompt(): string {
+  return [
+    "You are a senior PostgreSQL text-to-SQL analyst for a SaaS analytics UI.",
+    "Always call inspectSchema before writing SQL.",
+    "Use executeSql to run a safe read-only SELECT. If executeSql returns an error, revise the SQL and call executeSql again.",
+    "Do not expose hidden chain-of-thought. Explain only concise, user-facing observations.",
+    "Only produce answers from executed SQL results.",
+    "Supported visualizations are table, bar, line, and pie.",
+    "If the user asks for a table, choose table. If the user asks for a bar chart, line chart, or pie chart, say that the result is shown in that chart.",
+    "Business rules:",
+    "- \"2018年\" means order_purchase_timestamp >= TIMESTAMP '2018-01-01 00:00:00' and < TIMESTAMP '2019-01-01 00:00:00'.",
+    "- \"売り上げ\" or \"売上\" means SUM(order_items.price), unless the user explicitly asks for payment amount.",
+    "- Ranking should use ORDER BY in descending order and a LIMIT when the user asks for top N."
+  ].join("\n");
+}
 
-    return {
-      sql: result.output.sql,
-      explanation: result.output.explanation,
-      generationMode: "openai",
-      usage: {
-        inputTokens: result.usage.inputTokens ?? 0,
-        outputTokens: result.usage.outputTokens ?? 0,
-        totalTokens: result.usage.totalTokens ?? 0
-      }
-    };
-  } catch {
-    return {
-      sql: fallbackSql(question),
-      explanation: "OpenAI SQL生成が失敗したため、ローカルfallback SQLを使った。",
-      generationMode: "fallback",
-      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
-    };
-  }
+function requestedVisualizationKind(question: string): VisualizationKind {
+  if (/テーブル|表|table/i.test(question)) return "table";
+  if (/棒グラフ|bar/i.test(question)) return "bar";
+  if (/折れ線|line/i.test(question)) return "line";
+  if (/円グラフ|pie/i.test(question)) return "pie";
+  return "table";
 }

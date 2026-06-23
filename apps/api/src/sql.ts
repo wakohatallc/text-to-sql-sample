@@ -24,6 +24,32 @@ export type ExecutedSql = {
 };
 
 /**
+ * LLMに公開してよいtenant DB schema情報である。
+ */
+export type InspectedColumn = {
+  tableName: string;
+  columnName: string;
+  dataType: string;
+  ordinalPosition: number;
+  isPrimaryKey: boolean;
+};
+
+/**
+ * Text-to-SQLで参照を許可するtenant tableである。
+ */
+const allowedTables = [
+  "customers",
+  "sellers",
+  "product_category_translations",
+  "products",
+  "orders",
+  "order_items",
+  "order_payments",
+  "order_reviews",
+  "geolocations"
+] as const;
+
+/**
  * SQLをASTで検証し、単一SELECTかつ最大100行に正規化する。
  *
  * @param inputSql LLMまたはfallbackが生成したSQL候補。
@@ -82,4 +108,84 @@ export async function executeReadOnlySql(connection: DbConnection, sql: string):
     client.release();
     await pool.end();
   }
+}
+
+/**
+ * tenant DBからText-to-SQL用のschema metadataを取得する。
+ *
+ * @param connection tenant DB接続定義。
+ * @returns 許可tableのcolumn metadata。
+ */
+export async function inspectTenantSchema(connection: DbConnection): Promise<InspectedColumn[]> {
+  const pool = createTenantPool(connection);
+  const client = await pool.connect();
+
+  try {
+    const result = await client.query<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      ordinal_position: number;
+      is_primary_key: boolean;
+    }>(
+      `SELECT
+         c.table_name,
+         c.column_name,
+         c.data_type,
+         c.ordinal_position,
+         EXISTS (
+           SELECT 1
+             FROM pg_index i
+             JOIN pg_class t ON t.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+             JOIN pg_attribute a ON a.attrelid = t.oid
+            WHERE n.nspname = c.table_schema
+              AND t.relname = c.table_name
+              AND a.attname = c.column_name
+              AND i.indisprimary
+              AND a.attnum = ANY(i.indkey)
+         ) AS is_primary_key
+       FROM information_schema.columns c
+       WHERE c.table_schema = 'public'
+         AND c.table_name = ANY($1::text[])
+       ORDER BY c.table_name, c.ordinal_position`,
+      [allowedTables]
+    );
+
+    return result.rows.map((row) => ({
+      tableName: row.table_name,
+      columnName: row.column_name,
+      dataType: row.data_type,
+      ordinalPosition: row.ordinal_position,
+      isPrimaryKey: row.is_primary_key
+    }));
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+/**
+ * schema metadataをLLM prompt向けの短い文字列へ整形する。
+ *
+ * @param columns inspectTenantSchemaで取得したcolumn metadata。
+ * @returns table単位のschema context。
+ */
+export function formatSchemaContext(columns: InspectedColumn[]): string {
+  const grouped = new Map<string, InspectedColumn[]>();
+  for (const column of columns) {
+    const tableColumns = grouped.get(column.tableName) ?? [];
+    tableColumns.push(column);
+    grouped.set(column.tableName, tableColumns);
+  }
+
+  return Array.from(grouped.entries())
+    .map(([tableName, tableColumns]) => {
+      const fields = tableColumns
+        .sort((a, b) => a.ordinalPosition - b.ordinalPosition)
+        .map((column) => `${column.columnName} ${column.dataType}${column.isPrimaryKey ? " primary key" : ""}`)
+        .join(", ");
+      return `${tableName}(${fields})`;
+    })
+    .join("\n");
 }

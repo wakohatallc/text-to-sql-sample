@@ -14,17 +14,61 @@ export type User = {
 export type SqlResultRow = Record<string, string | number | boolean | null>;
 
 /**
- * 自然言語チャットをSQLへ変換し、実行した結果を返すAPIレスポンスである。
+ * ユーザーへ公開してよい、観測可能な作業ログである。
  */
-export type ChatResponse = {
-  threadId: string;
-  assistantMessage: string;
+export type TraceData = {
+  label: string;
+  status: "running" | "succeeded" | "failed";
+  detail?: string;
+};
+
+/**
+ * UIへstreamするSQL本文である。
+ */
+export type SqlData = {
   sql: string;
+};
+
+/**
+ * UIへstreamするSQL実行結果である。
+ */
+export type SqlResultData = {
   columns: string[];
   rows: SqlResultRow[];
   rowCount: number;
   durationMs: number;
-  generationMode: "openai" | "fallback";
+};
+
+/**
+ * SQL結果の描画形式である。
+ */
+export type VisualizationKind = "table" | "bar" | "line" | "pie";
+
+/**
+ * UIへstreamする可視化指定である。
+ */
+export type VisualizationData = {
+  kind: VisualizationKind;
+  xKey?: string;
+  yKey?: string;
+  seriesKey?: string;
+};
+
+/**
+ * AI SDK UI messageのcustom data partsである。
+ */
+export type ChatDataParts = {
+  trace: TraceData;
+  sql: SqlData;
+  "sql-result": SqlResultData;
+  visualization: VisualizationData;
+};
+
+/**
+ * assistant message metadataである。
+ */
+export type ChatMetadata = {
+  threadId?: string;
 };
 
 /**
