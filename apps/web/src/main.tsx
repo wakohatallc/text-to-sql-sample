@@ -1,7 +1,21 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useChat } from "@ai-sdk/react";
-import { AlertCircle, BarChart3, Database, LineChart as LineChartIcon, LogOut, PieChart as PieChartIcon, Play, RefreshCw, Send, Table2 } from "lucide-react";
+import {
+  AlertCircle,
+  BarChart3,
+  Code2,
+  Database,
+  LineChart as LineChartIcon,
+  ListChecks,
+  LogOut,
+  MessageSquareText,
+  PieChart as PieChartIcon,
+  Play,
+  RefreshCw,
+  Send,
+  Table2
+} from "lucide-react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import {
   Bar,
@@ -171,6 +185,28 @@ function ResultChart({ result, visualization }: { result: SqlResultData; visuali
   );
 }
 
+function MessageBlock({
+  children,
+  icon,
+  title,
+  compact = false
+}: {
+  children: React.ReactNode;
+  icon: React.ReactNode;
+  title: string;
+  compact?: boolean;
+}) {
+  return (
+    <section className="grid gap-2 rounded-md border bg-background p-3">
+      <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground">
+        {icon}
+        <span>{title}</span>
+      </div>
+      <div className={compact ? "text-xs leading-5" : "text-sm leading-6"}>{children}</div>
+    </section>
+  );
+}
+
 function AssistantMessage({ message }: { message: AppChatMessage }) {
   const traces = message.parts
     .filter((part) => part.type === "data-trace")
@@ -183,29 +219,36 @@ function AssistantMessage({ message }: { message: AppChatMessage }) {
 
   return (
     <article className="grid gap-3 border-b pb-4 last:border-b-0">
-      <div className="text-xs font-semibold uppercase text-muted-foreground">assistant</div>
       {message.parts
         .filter((part) => part.type === "text")
         .map((part, index) => (
-          <div className="whitespace-pre-wrap text-sm leading-6" key={`text-${index}`}>
-            {part.text}
-          </div>
+          <MessageBlock icon={<MessageSquareText className="h-3.5 w-3.5" />} key={`text-${index}`} title="応答">
+            <div className="whitespace-pre-wrap">{part.text}</div>
+          </MessageBlock>
         ))}
       {traces.length > 0 ? (
-        <div className="flex flex-wrap gap-2">
-          {traces.map((trace, index) => (
-            <Badge key={`${trace.label}-${index}`} variant={traceTone(trace.status)}>
-              {trace.label}
-              {trace.detail ? `: ${trace.detail}` : ""}
-            </Badge>
-          ))}
-        </div>
+        <MessageBlock compact icon={<ListChecks className="h-3.5 w-3.5" />} title="推論過程">
+          <div className="flex flex-wrap gap-1.5">
+            {traces.map((trace, index) => (
+              <Badge className="px-2 py-0 text-[11px] leading-5" key={`${trace.label}-${index}`} variant={traceTone(trace.status)}>
+                {trace.label}
+                {trace.detail ? `: ${trace.detail}` : ""}
+              </Badge>
+            ))}
+          </div>
+        </MessageBlock>
       ) : null}
       {sql ? (
-        <pre className="overflow-auto rounded-md border bg-muted/40 p-3 text-sm leading-6">{sql}</pre>
+        <details className="rounded-md border bg-muted/30 text-xs">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-semibold text-muted-foreground">
+            <Code2 className="h-3.5 w-3.5" />
+            SQL
+          </summary>
+          <pre className="overflow-auto border-t p-3 leading-5">{sql}</pre>
+        </details>
       ) : null}
       {result ? (
-        <div className="grid gap-2">
+        <MessageBlock icon={visualizationIcon(visualization.kind)} title="結果描画">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="secondary" className="gap-1">
               {visualizationIcon(visualization.kind)}
@@ -215,29 +258,30 @@ function AssistantMessage({ message }: { message: AppChatMessage }) {
             <Badge variant="outline">{result.durationMs} ms</Badge>
           </div>
           <ResultChart result={result} visualization={visualization} />
-        </div>
+        </MessageBlock>
       ) : null}
     </article>
   );
 }
 
-function ChatMessage({ message }: { message: AppChatMessage }) {
-  if (message.role === "assistant") {
-    return <AssistantMessage message={message} />;
-  }
-
+function UserMessage({ message }: { message: AppChatMessage }) {
   return (
-    <article className="grid gap-1 border-b pb-3 last:border-b-0">
-      <div className="text-xs font-semibold uppercase text-muted-foreground">{message.role}</div>
+    <article className="grid gap-3 border-b pb-4 last:border-b-0">
+      <MessageBlock icon={<MessageSquareText className="h-3.5 w-3.5" />} title="ユーザー入力">
       {message.parts
         .filter((part) => part.type === "text")
         .map((part, index) => (
-          <div className="whitespace-pre-wrap text-sm leading-6" key={index}>
+          <div className="whitespace-pre-wrap" key={index}>
             {part.text}
           </div>
         ))}
+      </MessageBlock>
     </article>
   );
+}
+
+function ChatMessage({ message }: { message: AppChatMessage }) {
+  return message.role === "assistant" ? <AssistantMessage message={message} /> : <UserMessage message={message} />;
 }
 
 /**
